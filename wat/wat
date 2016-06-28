@@ -1,0 +1,876 @@
+#!/usr/bin/env python3
+
+import os
+import confprod
+import json
+import functools
+import uuid
+import yaml
+import shutil
+import datetime
+from enum import IntEnum
+from dateutil import parser as dateparser
+from pymongo import MongoClient
+import argparse
+import numpy as np
+import random
+
+
+class Status(IntEnum):
+    init = 1
+    copied = 2
+    running = 3
+    done = 4
+    collected = 5
+    saved = 6
+    processed = 7
+    aborted = 98
+    error = 99
+
+
+def base_dir():
+    return os.path.expanduser("~/.wat")
+
+
+def data_dir():
+    return os.path.join(base_dir(), ".data")
+
+
+def files_dir():
+    return os.path.join(data_dir(), "files")
+
+
+def hosts_dir():
+    return os.path.join(data_dir(), "hosts")
+
+
+def host_dir(hostname):
+    return os.path.join(hosts_dir(), hostname)
+
+
+def host_experiments_file(hostname):
+    return os.path.join(host_dir(hostname), "experiments")
+
+
+def experiments_dir():
+    return os.path.join(data_dir(), "experiments")
+
+
+def experiment_dir(experiment):
+    return os.path.join(experiments_dir(), experiment)
+
+
+def conf_spec_path(experiment):
+    return os.path.join(experiment_dir(experiment), 'conf_spec.yml')
+
+
+def remote_experiments_dir(hostpath):
+    return "{}/experiments".format(hostpath)
+
+
+def remote_experiment_dir(hostpath, uid):
+    return "{}/{}".format(remote_experiments_dir(hostpath), uid)
+
+
+def remote_config_dir(hostpath, experiment, config):
+    return "{}/{}".format(remote_experiment_dir(hostpath, experiment), config)
+
+
+def configs_dir(experiment):
+    return os.path.join(experiment_dir(experiment), "configs")
+
+
+def config_dir(experiment, config):
+    return os.path.join(configs_dir(experiment), str(config))
+
+
+def config_host_file(experiment, config):
+    return os.path.join(config_dir(experiment, config), "host")
+
+
+def config_path_file(experiment, config):
+    return os.path.join(config_dir(experiment, config), "path")
+
+
+def base_hosts_file():
+    return os.path.join(base_dir(), "hosts.yml")
+
+
+def base_remotes_file():
+    return os.path.join(base_dir(), "remotes.yml")
+
+
+def _copy_dir(src, src_base, dst_full):
+    src_full = os.path.join(src_base, src)
+    if not os.path.isdir(dst_full):
+        os.mkdir(dst_full)
+    for fn in os.listdir(src_full):
+        src_full_fn = os.path.join(src_full, fn)
+        dst_full_fn = os.path.join(dst_full, fn)
+        if os.path.isdir(src_full_fn):
+            _copy_dir(fn, src_full, dst_full_fn)
+        else:
+            shutil.copy(src_full_fn, dst_full_fn)
+
+
+def _ensure_basedir():
+    for dr in [base_dir(), data_dir(), experiments_dir()]:
+        if not os.path.isdir(dr):
+            os.mkdir(dr)
+    installpath = os.path.dirname(os.path.dirname(os.path.abspath(os.path.realpath(__file__))))
+    _copy_dir('files', installpath, files_dir())
+
+
+def _ensure_list(l):
+    return l if isinstance(l, list) else [l]
+
+
+def _uuid():
+    return str(uuid.uuid4())
+
+
+def _get_remote_for_name(name):
+    remotes = _read_yaml_file(base_remotes_file())['remotes']
+    for r in remotes:
+        if r['name'] == name:
+            return r
+    raise Exception("Remote '{}' not found".format(name))
+
+
+def _get_host_for_name(name):
+    with open(base_hosts_file()) as f:
+        bhf = yaml.load(f)
+    hosts = bhf['hosts']
+    host_dict = dict((h['name'], h) for h in hosts)
+    return host_dict[name]
+
+
+def _get_hosts(hostset=None):
+    with open(base_hosts_file()) as f:
+        bhf = yaml.load(f)
+    hosts, groups = bhf['hosts'], bhf['groups']
+    host_dict = dict((h['name'], h) for h in hosts)
+    group_dict = dict((g['name'], g) for g in groups)
+    full_dict = dict((h['name'], [h]) for h in hosts)
+
+    def resolve_group(g):
+        gl = []
+        for m in g['members']:
+            if m in host_dict:
+                gl.append(host_dict[m])
+            elif m in group_dict:
+                ml = resolve_group(group_dict[g])
+                gl += ml
+            else:
+                # add "empty" host
+                gl.append({"name": m})
+        return gl
+
+    for g in groups:
+        gl = resolve_group(g)
+        full_dict[g['name']] = gl
+
+    host_list = []
+    if hostset is not None:
+        for h in hostset:
+            host_list += full_dict[h]
+    else:
+        hdict = dict()
+        for hl in full_dict.values():
+            for h in hl:
+                if h['name'] not in hdict:
+                    hdict[h['name']] = h
+        host_list = hdict.values()
+
+    for h in host_list:
+        if 'hostname' not in h:
+            h['hostname'] = h['name']
+        if 'path' not in h:
+            h['path'] = '.wattmp'
+        if 'role' not in h:
+            h['role'] = 'generic'
+        if 'run_file' not in h:
+            h['run_file'] = 'python3_sacred.sh'
+        if 'environment_files' not in h:
+            h['environment_files'] = []
+        if 'parallel' not in h:
+            h['parallel'] = 1
+        if 'speed' not in h:
+            h['speed'] = 1.0
+
+    return host_list
+
+
+def _system(cmd, raise_on_error=True):
+    status = os.system(cmd)
+    if status != 0 and raise_on_error:
+        raise Exception("System call failed: {}".format(cmd))
+    return status
+
+
+def run(args):
+    uid = _uuid()
+    print("Starting experiment {}".format(uid))
+    with open(args.experiment_file) as f:
+        configuration = yaml.load(f)
+    confs = confprod.generate_configurations(configuration[
+        'parameters']) if 'parameters' in configuration else {}
+    main_file = configuration['main_file']
+    confs_path = configs_dir(uid)
+    os.makedirs(confs_path)
+    shutil.copy(args.experiment_file, conf_spec_path(uid))
+    tmp_entries = []
+    for idx, conf in enumerate(confs):
+        config = str(idx)
+        conf_path = config_dir(uid, config)
+        os.makedirs(conf_path)
+        fn = "{}/local_config.json".format(conf_path)
+        with open(fn, 'w') as f:
+            json.dump(conf, f)
+        tmp_entries.append(config)
+
+    if args.shuffle:
+        random.shuffle(tmp_entries)
+
+    hostset = configuration['hosts']
+    hosts = _get_hosts(hostset)
+
+    host_speeds = np.array(list(map(lambda h: h['speed'], hosts)), dtype=np.float32)
+    host_parallels = np.array(list(map(lambda h: h['parallel'], hosts)), dtype=np.int64)
+
+    host_capacities = np.multiply(host_speeds, host_parallels)
+    total_capacity = np.sum(host_capacities)
+    scale_factor = len(tmp_entries) / total_capacity
+    scaled_capacities = np.int64(np.round(host_capacities * scale_factor))
+
+    cap_sort_idx = np.argsort(scaled_capacities).tolist()[::-1]
+    # sorted_hosts, sorted_capacities, sorted_parallels = map(lambda l: [l[i] for i in cap_sort_idx], (hosts, scaled_capacities, host_parallels))
+    entry_groups = [[] for _ in hosts]
+    hi = -1
+    for te in tmp_entries:
+        while True:
+            hi += 1
+            si = cap_sort_idx[hi % len(hosts)]
+            if scaled_capacities[si] > 0 or np.all(np.asarray(scaled_capacities) <= 0):
+                scaled_capacities[si] -= 1
+                entry_groups[si].append(te)
+                break
+
+    for host, tmp_entries_host, host_parallel in zip(hosts, entry_groups, host_parallels):
+
+        run_file = host['run_file']
+        if not run_file.startswith('/'):
+            run_file = os.path.join(files_dir(), 'run', run_file)
+
+        role_dir = host['role']
+        if role_dir.endswith('/'):
+            role_dir = role_dir[:-1]
+        if not role_dir.startswith('/'):
+            role_dir = os.path.join(files_dir(), 'roles', role_dir)
+
+        for parallel_group in range(host_parallel):
+            tmp_entries_parallel_group = tmp_entries_host[parallel_group::host_parallel]
+            last_config = None
+            for config in tmp_entries_parallel_group:
+                rsync_host = host['hostname']
+                rsync_path = remote_config_dir(host['path'], uid, config)
+                rsync_host_path = "{}:{}".format(rsync_host, rsync_path)
+
+                conf_path = config_dir(uid, config)
+                with open("{}/host".format(conf_path), 'w') as f:
+                    f.write(rsync_host)
+                with open("{}/path".format(conf_path), 'w') as f:
+                    f.write(rsync_path)
+
+                rsync_cmd = 'rsync -qavzhe "ssh -q" --rsync-path="mkdir -p {} && rsync" {} --exclude "**/*.swp" --delete . {}'.format(rsync_path, "--exclude-from '.watignore'" if os.path.isfile('.watignore') else '', rsync_host_path)
+                scp_cfg_cmd = "scp -q {}/local_config.json ".format(conf_path)
+                scp_cfg_cmd += "{}/* ".format(role_dir)
+                scp_cfg_cmd += "{} ".format(run_file)
+                scp_cfg_cmd += "{}".format(rsync_host_path)
+                print("Copying {} to {}".format(uid, rsync_host_path))
+                _system(rsync_cmd)
+                _system(scp_cfg_cmd)
+
+                _write_status(conf_path, Status.copied)
+
+                # ssh_cmd = 'ssh -qt {} "cd {} && echo running > status && date > starttime && (nohup sh -lic \'python3 {} with local_config.json --disable_suspicious_changes_warnings; echo \\$? > exit_status ; echo done > status; date > endtime\' > stdout.txt 2> stderr.txt < /dev/null &)"'.format(rsync_host, rsync_path, main_file)
+                ssh_cmd = "ssh -q {} 'echo \"cd ; cd {} ; ".format(rsync_host, rsync_path)
+                ssh_cmd += 'WAT_ENV_FILES=\\"{}\\" '.format(" ".join(_ensure_list(host['environment_files'])))
+                ssh_cmd += 'WAT_EXPERIMENT_FILE=\\"{}\\" '.format(main_file)
+                ssh_cmd += 'WAT_RUN_CMD=\\"{}\\" '.format(os.path.basename(run_file))
+                ssh_cmd += "$SHELL {}\" > {}'".format('role_main.sh', os.path.join(rsync_path, 'wat_run_cmd.sh'))
+                print("Running {} on {}".format(uid, host['name']))
+                _system(ssh_cmd)
+
+                if last_config is not None:
+                    lc, rsh, rsp = last_config
+                    ssh_ln_cmd = "ssh -q {} '(export WAT_NEXT_RUN_CMD_DIR=`cd {} ; pwd` ; ".format(rsync_host, rsp)
+                    ssh_ln_cmd += "cd ; cd {} ; ln -s $WAT_NEXT_RUN_CMD_DIR/wat_run_cmd.sh wat_run_next_cmd.sh ; cd ; cd {} ; echo copied > status".format(rsync_path, rsp)
+                    ssh_ln_cmd += ")'"
+                    _system(ssh_ln_cmd)
+
+                last_config = (config, rsync_host, rsync_path)
+
+            if last_config is not None:
+                lc, rsh, rsp = last_config
+                ssh_run_cmd = "ssh -q {} 'cd {} ; $SHELL wat_run_cmd.sh'".format(rsync_host, rsp)
+                _system(ssh_run_cmd)
+
+
+def _get_experiments():
+    return os.listdir(experiments_dir())
+
+
+def list_experiments():
+    for d in _get_experiments():
+        print(d)
+
+
+def _write_status(config_dir, status):
+    with open("{}/status".format(config_dir), 'w') as f:
+        f.write(status.name)
+
+
+def _read_status(config_dir):
+    with open("{}/status".format(config_dir)) as f:
+        return Status[f.read().strip()]
+
+
+def _remote_status(host, path, config_dir):
+    scp_cmd = 'rsync -qavzhe "ssh -q" '
+    for fn in ['status', 'starttime', 'endtime', 'exit_status', 'stdout.txt', 'stderr.txt']:
+        scp_cmd += "--include={} ".format(fn)
+    scp_cmd += "--exclude='*' "
+    scp_cmd += "{}:{}/ ".format(host, path)
+    scp_cmd += "{}".format(config_dir)
+
+    status_fn = "{}/status".format(config_dir)
+    start_fn = "{}/starttime".format(config_dir)
+    end_fn = "{}/endtime".format(config_dir)
+    exit_status_fn = "{}/exit_status".format(config_dir)
+
+    reachable = True
+
+    status = None
+    if os.path.isfile(exit_status_fn) and _read_file(exit_status_fn).strip() != "0":
+        status = Status.error
+        with open(status_fn, 'w') as f:
+            f.write('error')
+    if not status == Status.error:
+        if os.path.isfile(status_fn):
+            status = _read_status(config_dir)
+
+    if status is None or status < Status.collected:
+        try:
+            _system(scp_cmd)
+        except:
+            reachable = False
+        status = _read_status(config_dir)
+    mtime = datetime.datetime.fromtimestamp(os.path.getmtime(status_fn))
+
+    start_time = None
+    if os.path.isfile(start_fn):
+        start_time_string = _read_file(start_fn)
+        start_time = dateparser.parse(start_time_string).replace(tzinfo=None)
+    end_time = None
+    if os.path.isfile(end_fn):
+        end_time_string = _read_file(end_fn)
+        end_time = dateparser.parse(end_time_string).replace(tzinfo=None)
+    exit_status = None
+    if os.path.isfile(exit_status_fn):
+        exit_status = _read_file(exit_status_fn)
+    return dict(status=status, reachable=reachable, mtime=mtime, start_time=start_time, end_time=end_time, exit_status=exit_status)
+
+
+def _status(exp, act=True):
+    confs_dir = configs_dir(exp)
+    conf_status = []
+    for c in os.listdir(confs_dir):
+        with open(config_host_file(exp, c)) as f:
+            hn = f.read().strip()
+        with open(config_path_file(exp, c)) as f:
+            hp = f.read().strip()
+        rem_stat = _remote_status(hn, hp, config_dir(exp, c))
+        if act and rem_stat['status'] == Status.done and rem_stat['reachable']:
+            _copy_from_remote(exp, c)
+            rem_stat = _remote_status(hn, hp, config_dir(exp, c))
+        rem_stat['config'] = c
+        rem_stat['hostname'] = hn
+        rem_stat['hostpath'] = hp
+        conf_status.append(rem_stat)
+
+    exp_status = min([c['status'] for c in conf_status])
+
+    start_times = [c.get('start_time') for c in conf_status if c.get('start_time') is not None]
+    exp_start = min(start_times) if start_times else None
+
+    exp_end = None
+    if exp_status >= Status.done:
+        end_times = [c.get('end_time') for c in conf_status if c.get('end_time') is not None]
+        exp_end = max(end_times) if end_times else None
+
+    eta = None
+    if exp_status < Status.done and exp_start is not None:
+        dones = [c for c in conf_status if c['status'] >= Status.done]
+        if len(dones) > 0:
+            avg_secs = functools.reduce(lambda c, n: c + (n['end_time'] - n['start_time']).seconds, dones, 0) / len(dones)
+            eta_secs = (len(conf_status) - len(dones)) * avg_secs
+            now = datetime.datetime.now()
+            for c in conf_status:
+                if c['status'] == Status.running:
+                    c['eta'] = c['start_time'] + datetime.timedelta(seconds=avg_secs)
+                    running_secs_c = (now - c['start_time']).seconds
+                    eta_secs -= running_secs_c
+            eta_secs = max(0, np.round(eta_secs))
+            eta = now + datetime.timedelta(seconds=eta_secs)
+
+    return dict(status=exp_status, start_time=exp_start, end_time=exp_end, configurations=conf_status, eta=eta)
+
+
+def _copy_from_remote(exp, config):
+    with open(config_host_file(exp, config)) as f:
+        hn = f.read().strip()
+    with open(config_path_file(exp, config)) as f:
+        hp = f.read().strip()
+    scp_cmd = 'rsync -qavzhe "ssh -q" '
+    for fn in ['endtime', 'exit_status', 'output.json', 'stdout.txt', 'stderr.txt']:
+        scp_cmd += "--include={} ".format(fn)
+    scp_cmd += "--exclude='*' "
+    scp_cmd += "{}:{}/ ".format(hn, hp)
+    cd = config_dir(exp, config)
+    scp_cmd += "{}".format(cd)
+    _system(scp_cmd)
+    ssh_cmd = 'ssh -q {} "rm -rf {}"'.format(hn, hp)
+    _system(ssh_cmd)
+    _write_status(cd, Status.collected)
+
+
+def status(act=True):
+    for e in _get_experiments():
+        stats = _status(e, act=act)
+        print("{}\t{}".format(e, stats['status'].name), end='\t')
+        if stats.get('start_time') is not None:
+            print("{}".format(stats['start_time']), end='\t')
+            if stats.get('end_time') is not None:
+                print("{}".format(stats['end_time']), end='\t')
+            elif stats.get('eta') is not None:
+                print("(ETA: {})".format(stats['eta']), end='\t')
+        print()
+        for stat in stats['configurations']:
+            print('\t', stat['config'], end="\t")
+            print(stat['hostname'], end="\t")
+            # print("{} ({})".format(stat['status'].name, "live" if stat['reachable'] and stat['status'] < Status.collected else stat['mtime']), end='\t')
+            print("{}".format(stat['status'].name), end='\t')
+            if stat.get('start_time') is not None:
+                print(stat['start_time'], end="\t")
+                if stat.get('end_time') is not None:
+                    print(stat['end_time'], end="\t")
+                elif stat.get('eta') is not None:
+                    print("(ETA: {})".format(stat['eta']), end="\t")
+            print()
+        print()
+
+
+def save(args):
+    with MongoClient() as client:
+        db = client['wat']
+        if args.search_string is None:
+            experiments = _get_experiments()
+        else:
+            experiments = [_find_single_experiment(args.search_string)]
+        for e in experiments:
+            stats = _status(e, act=False)
+            if stats['status'] == Status.collected:
+                with open(conf_spec_path(e)) as f:
+                    conf_spec = yaml.load(f)
+                exp_dict = dict(_id=e, configurations=[], conf_spec=conf_spec, start_time=stats['start_time'])
+                for cs in stats['configurations']:
+                    cd = config_dir(e, cs['config'])
+                    end_time, exit_status, stdout, stderr = map(lambda fn: _read_file("{}/{}".format(cd, fn).strip()), ['endtime', 'exit_status', 'stdout.txt', 'stderr.txt'])
+                    local_config, output = map(lambda fn: _read_json_file("{}/{}".format(cd, fn)), ['local_config.json', 'output.json'])
+                    c_dict = dict(config=cs['config'], hostname=cs['hostname'], hostpath=cs['hostpath'], start_time=cs['start_time'], end_time=end_time, exit_status=exit_status, stdout=stdout, stderr=stderr, local_config=local_config, output=output)
+                    exp_dict['configurations'].append(c_dict)
+
+                exp_dict['date'] = datetime.datetime.now()
+
+                db['experiments'].replace_one({'_id': exp_dict['_id']}, exp_dict, upsert=True)
+
+                for cs in stats['configurations']:
+                    _write_status(config_dir(e, cs['config']), Status.saved)
+
+                print("Saved {}".format(e))
+
+                if 'analysis' in conf_spec:
+                    _analyze_experiment(exp_dict, conf_spec['analysis'])
+
+
+def clean():
+    for e in _get_experiments():
+        stats = _status(e, act=False)
+        if stats['status'] == Status.saved:
+            _purge(e)
+
+
+def _purge(exp):
+    shutil.rmtree(experiment_dir(exp))
+    print('Deleted experiment {}'.format(exp))
+
+
+def _abort_config(exp, config):
+    try:
+        host = _read_file(config_host_file(exp, config))
+        path = _read_file(config_path_file(exp, config))
+        status = _read_status(config_dir(exp, config))
+        if status <= Status.running:
+            print("Aborting config {}".format(config))
+            ssh_cmd = "ssh -q {} 'cd {} ; $SHELL role_abort.sh ; echo aborted > status'".format(host, path)
+            _system(ssh_cmd, raise_on_error=False)
+    except:
+        print("Error aborting config {}".format(config))
+
+
+def _abort(exp):
+    confs_dir = configs_dir(exp)
+    for config in os.listdir(confs_dir):
+        _abort_config(exp, config)
+    print('Aborted experiment {}'.format(exp))
+
+
+def _read_file(fn):
+    with open(fn) as f:
+        return f.read()
+
+
+def _read_json_file(fn):
+    with open(fn) as f:
+        return json.load(f)
+
+
+def _read_yaml_file(fn):
+    with open(fn) as f:
+        return yaml.load(f)
+
+
+def abort_experiment(args):
+    for sstr in args.search_string:
+        exp = _find_single_experiment(sstr)
+        _abort(exp)
+
+
+def abort_config(args):
+    sstr = args.search_string
+    config = args.configuration
+    exp = _find_single_experiment(sstr)
+    _abort_config(exp, config)
+
+
+def purge_experiment(args):
+    for sstr in args.search_string:
+        exp = _find_single_experiment(sstr)
+        _purge(exp)
+
+
+def confirm(prompt='Really?'):
+    a = input(prompt + "[yN]")
+    if a == 'y' or a == 'Y':
+        return
+    exit(0)
+
+
+def abort_all_experiments():
+    confirm()
+    for e in _get_experiments():
+        _abort(e)
+
+
+def purge_all_experiments():
+    confirm()
+    for e in _get_experiments():
+        _purge(e)
+
+
+def delete_orphans():
+    exps = _get_experiments()
+    hosts = _get_hosts()
+    for h in hosts:
+        hdir = host_dir(h['name'])
+        os.makedirs(hdir, exist_ok=True)
+        exp_file = host_experiments_file(h['name'])
+        ssh_cmd = 'ssh -q {} "cd {} 2>/dev/null && ls experiments > all_experiments"'.format(h['hostname'], h['path'])
+        scp_cmd = 'scp -q {}:{}/all_experiments {}'.format(h['hostname'], h['path'], exp_file)
+        try:
+            _system(ssh_cmd)
+            _system(scp_cmd)
+            with open(exp_file) as f:
+                hexps = [l.strip() for l in f.readlines()]
+            to_delete = [e for e in hexps if e not in exps]
+            print("{}\t{}".format(h['name'], " ".join(to_delete)))
+            ssh_del_cmd = 'ssh -q {} "cd {}/experiments && rm -rf {}"'.format(h['hostname'], h['path'], " ".join(to_delete))
+            _system(ssh_del_cmd)
+            os.remove(exp_file)
+        except:
+            print("{}\tunreachable".format(h['name']))
+
+
+def _find_experiments(sstr):
+    return [e for e in _get_experiments() if e.startswith(sstr)]
+
+
+def _db_find_experiments(sstr):
+    with MongoClient() as client:
+        db = client['wat']
+        return list(db.experiments.find({'_id': {'$regex': '^{}'.format(sstr)}}))
+
+
+def _find_single_experiment(sstr):
+    exps = _find_experiments(sstr)
+    if len(exps) == 0:
+        raise Exception("Experiment not found: {}".format(sstr))
+    if len(exps) > 1:
+        raise Exception("Ambiguous search string: {}".format(sstr))
+    return exps[0]
+
+
+def _db_find_single_experiment(sstr):
+    exps = _db_find_experiments(sstr)
+    if len(exps) == 0:
+        raise Exception("Experiment not found: {}".format(sstr))
+    if len(exps) > 1:
+        raise Exception("Ambiguous search string: {}".format(sstr))
+    return exps[0]
+
+
+def _db_find_latest_experiment():
+    with MongoClient() as client:
+        db = client['wat']
+        return db.experiments.find_one({}, sort=[('date', -1)])
+
+
+def find_experiments(sstr):
+    for e in _find_experiments(sstr):
+        print(e)
+
+
+def _get_from_nested_dict(d, k, safe=False, default=None):
+    ks = k.split('.')
+    for k in ks:
+        if safe:
+            if d is not default:
+                d = d.get(k, default)
+        else:
+            d = d[k]
+    return d
+
+
+def _analyze_experiment(exp_dict, analysis_specs, replace=False):
+    if not isinstance(analysis_specs, list):
+        analysis_specs = [analysis_specs]
+    with MongoClient() as client:
+        db = client['wat']
+        if replace:
+            db.analysis.remove({'experiment': exp_dict['_id']})
+        for spec in analysis_specs:
+            name = spec['name']
+            a = dict(spec=spec)
+            a['date'] = datetime.datetime.now()
+            a['experiment'] = exp_dict['_id']
+            a['_id'] = _uuid()
+            print("Saving analysis {}: {}".format(exp_dict['_id'], name))
+            db.analysis.insert_one(a)
+
+
+def _analyze(experiment, analysis_spec, replace=False):
+    analysis = analysis_spec['analysis']
+    with MongoClient() as client:
+        db = client['wat']
+        exp_dict = db.experiments.find_one({'_id': experiment})
+    _analyze_experiment(exp_dict, analysis, replace=replace)
+
+
+def analyze(args):
+    if args.experiment_search_string is not None:
+        experiment = _db_find_single_experiment(args.experiment_search_string)['_id']
+    else:
+        experiment = _db_find_latest_experiment()['_id']
+    analysis_spec = _read_yaml_file(args.analysis_file_name)
+    _analyze(experiment, analysis_spec, replace=args.replace)
+
+
+def delete_config(args):
+    sstr = args.experiment_search_string
+    config = args.configuration
+
+    exp = _find_single_experiment(sstr)
+    conf_dir = config_dir(exp, config)
+    rm_cmd = "rm -rf {}".format(conf_dir)
+    _system(rm_cmd)
+    print("deleted config {}".format(config))
+
+
+def cat(args):
+    sstr = args.experiment_search_string
+    config = args.configuration
+    fn = args.file_name
+    remote = args.remote
+
+    exp = _find_single_experiment(sstr)
+    if not remote:
+        path = config_dir(exp, config)
+        fp = "{}/{}".format(path, fn)
+        with open(fp) as f:
+            for line in f:
+                print(line.strip())
+    else:
+        hn = _read_file(config_host_file(exp, config))
+        path = _read_file(config_path_file(exp, config))
+        ssh_cmd = 'ssh -q {} "cat {}/{}"'.format(hn, path, fn)
+        _system(ssh_cmd)
+
+
+def push(args):
+    rname = args.remote_name
+    remote = _get_remote_for_name(rname)
+
+    for col in ['experiments', 'analysis']:
+        fn = os.path.join(data_dir(), '{}.json'.format(col))
+        e_cmd = "mongoexport --db wat --collection {} --out {}".format(col, fn)
+        i_cmd = "mongoimport --host {}:{} --db wat --collection {} --upsert -j 4 --file {}".format(remote['hostname'], remote['port'], col, fn)
+        _system(e_cmd)
+        _system(i_cmd)
+        print("pushed collection {}".format(col))
+
+
+def attach(args):
+    sstr = args.experiment_search_string
+    exp = _find_single_experiment(sstr)
+    config = args.configuration
+    n, e = args.num_lines, args.error
+    host = _read_file(config_host_file(exp, config))
+    path = _read_file(config_path_file(exp, config))
+    fn = "stderr.txt" if e else "stdout.txt"
+    ssh_cmd = 'ssh -q {} "cd {} ; echo attaching to {}:{}/{}... ; tail -n {} -f {}"'.format(
+              host, path, host, path, fn, n, fn)
+    _system(ssh_cmd, raise_on_error=False)
+
+
+def _main():
+    parser = argparse.ArgumentParser(description="Experiment running tool")
+
+    subparsers = parser.add_subparsers(dest="command", help="command")
+
+    no_args_dict = {
+        'list': 'list experiments',
+        'status': 'display status of running experiments',
+        'act': 'do work where work can be done',
+        'purgeall': 'purge all experiments',
+        'abortall': 'abort all experiments',
+        'deleteorphans': 'delete orphans on remote hosts',
+        'clean': 'clean up saved experiments',
+    }
+
+    for k, v in no_args_dict.items():
+        subparsers.add_parser(k, help=v)
+
+    parser_run = subparsers.add_parser("run", help="run an experiment")
+    parser_run.add_argument('experiment_file')
+    parser_run.add_argument('-s', '--shuffle', action='store_true', help="shuffle the created configurations before distributing")
+    parser_run.set_defaults(func=run)
+
+    parser_find = subparsers.add_parser("find", help="find experiments")
+    parser_find.add_argument('search_string')
+
+    parser_purge = subparsers.add_parser("purge", help="purge an experiment")
+    parser_purge.add_argument('search_string', nargs='+')
+    parser_purge.set_defaults(func=purge_experiment)
+
+    parser_abort = subparsers.add_parser("abort", help="abort an experiment")
+    parser_abort.add_argument('search_string', nargs='+')
+    parser_abort.set_defaults(func=abort_experiment)
+
+    parser_abort_config = subparsers.add_parser("abortconfig", help="abort a config")
+    parser_abort_config.add_argument('search_string')
+    parser_abort_config.add_argument('configuration')
+    parser_abort_config.set_defaults(func=abort_config)
+
+    parser_save = subparsers.add_parser("save", help="save done and collected experiments")
+    parser_save.add_argument('search_string', nargs='?')
+    parser_save.set_defaults(func=save)
+
+    parser_analyze = subparsers.add_parser("analyze", help="analyze an experiment")
+    parser_analyze.add_argument('analysis_file_name')
+    parser_analyze.add_argument('experiment_search_string', nargs='?', default=None)
+    parser_analyze.add_argument('-r', '--replace', action='store_true', help="replace the last analysis")
+    parser_analyze.set_defaults(func=analyze)
+
+    parser_attach = subparsers.add_parser("attach", help="attach to stdout or stderr of an experiment")
+    parser_attach.add_argument('experiment_search_string')
+    parser_attach.add_argument('configuration')
+    parser_attach.add_argument('-e', '--error', action='store_true', help="attach to stderr instead of stdout")
+    parser_attach.add_argument('-n', '--num-lines', type=int, help="number of lines to output", default=10)
+    parser_attach.set_defaults(func=attach)
+
+    parser_delete_config = subparsers.add_parser("deleteconfig", help="delete a config directory")
+    parser_delete_config.add_argument('experiment_search_string')
+    parser_delete_config.add_argument('configuration')
+    parser_delete_config.set_defaults(func=delete_config)
+
+    parser_cat = subparsers.add_parser("cat", help="output a file")
+    parser_cat.add_argument('experiment_search_string')
+    parser_cat.add_argument('configuration')
+    parser_cat.add_argument('file_name')
+    parser_cat.add_argument('-r', '--remote', action='store_true', help="output a file on the remote")
+    parser_cat.set_defaults(func=cat)
+
+    parser_cat = subparsers.add_parser("push", help="push database to remote server")
+    parser_cat.add_argument('remote_name')
+    parser_cat.set_defaults(func=push)
+
+    args = parser.parse_args()
+
+    # print(args)
+
+    _ensure_basedir()
+    command = args.command
+    if command == 'run':
+        args.func(args)
+    elif command == 'list':
+        list_experiments()
+    elif command == 'status':
+        status(act=False)
+    elif command == 'act':
+        status(act=True)
+    elif command == 'find':
+        find_experiments(args.search_string)
+    elif command == 'purge':
+        args.func(args)
+    elif command == 'abort':
+        args.func(args)
+    elif command == 'purgeall':
+        purge_all_experiments()
+    elif command == 'abortall':
+        abort_all_experiments()
+    elif command == 'deleteorphans':
+        delete_orphans()
+    elif command == 'save':
+        args.func(args)
+    elif command == 'clean':
+        clean()
+    elif command == 'analyze':
+        # analyze(args.experiment_search_string, args.analysis_file_name)
+        args.func(args)
+    elif command == 'attach':
+        args.func(args)
+    elif command == 'cat':
+        args.func(args)
+    elif command == 'deleteconfig':
+        args.func(args)
+    elif command == 'push':
+        args.func(args)
+    else:
+        print("Unknown command")
+        exit(1)
+    exit(0)
+
+
+if __name__ == '__main__':
+    _main()

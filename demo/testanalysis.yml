@@ -1,0 +1,16 @@
+analysis:
+    - name: a plots
+      atype: plot
+      compare: 'a'
+      x_data: 'output.line.points'
+      y_data: 'output.line.data'
+      steps:
+          - action: average
+            with_std: true
+            parameters: 
+                - repetition
+
+          - action: compare
+            parameters: 
+                - a
+

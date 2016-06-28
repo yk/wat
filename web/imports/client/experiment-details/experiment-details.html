@@ -1,0 +1,27 @@
+<h3>Experiment {{experiment?._id}}</h3>
+<a [routerLink]="['ExperimentList']">Back</a>
+<button (click)="deleteExperiment()">Delete</button>
+<h4>{{experiment?.description}}</h4>
+<div>
+    <div *ngIf="!experiment">
+        <p>loading experiment...</p>
+    </div>
+    <div *ngFor="#ana of analyses">
+        <div *ngIf="ana?.spec?.atype === 'plot' && !!experiment">
+            <analysis-plot [experiment]="experiment" [analysis]="ana"></analysis-plot>
+        </div>
+        <div *ngIf="ana?.spec?.atype === 'scatter' && !!experiment">
+            <analysis-scatter [experiment]="experiment" [analysis]="ana"></analysis-scatter>
+        </div>
+    </div>
+</div>
+<p><label>Start:&nbsp;</label>{{experiment?.start_time}}</p>
+<h4>Configuration Spec</h4>
+<pre>{{experiment?.conf_spec | json}}</pre>
+<h4>Local Configurations</h4>
+<div *ngFor="#conf of experiment?.configurations" class="local-config">
+    <p>{{conf.config}}</p>
+    <p>{{conf.hostname}}:{{conf.hostpath}}</p>
+    <p>{{conf.start_time}} - {{conf.end_time}}</p>
+    <p>{{conf.local_config | json}} </p>
+</div>

@@ -1,0 +1,27 @@
+<h2>Experiments</h2>
+<div>
+  <table>
+      <tr>
+          <th></th>
+          <th>Id</th>
+          <th>Description</th>
+          <th></th>
+          <th></th>
+          <th></th>
+      </tr>
+    <tr *ngFor="#exp of experiments">
+        <td>
+            <a [routerLink]="['/ExperimentDetails', {experimentId: exp._id}]">View</a>
+        </td>
+        <td>{{exp._id.substring(0, 6)}}</td>
+        <td>
+            <input class="description" [(ngModel)]="exp.description" placeholder="description">
+            <button (click)="setDescription(exp, exp.description)">Save</button>
+        </td>
+        <td class="starttime">{{exp.start_time}}</td>
+        <td>
+        <button (click)="deleteExperiment(exp)">Delete</button>
+        </td>
+    </tr>
+  </table>
+</div>

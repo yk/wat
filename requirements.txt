@@ -1,0 +1,3 @@
+git+https://github.com/yk/confprod.git
+pydash
+python-dateutil

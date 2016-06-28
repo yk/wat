@@ -1,0 +1,10 @@
+parameters:
+    message: Hello world
+    a: [1, 2]
+    repetition: [0,1,2,3,4,5]
+    b:
+        - same
+
+main_file: testexperiment.py
+hosts:
+    - local

@@ -1,0 +1,22 @@
+.description {
+    /*display: block;*/
+    min-width: 20em;
+}
+
+tr > th {
+    border-top: 2px solid black;
+    border-bottom: 1px solid black;
+}
+
+tr > * {
+    padding-top: 0.5em;
+    padding-bottom: 0.5em;
+}
+
+tr:nth-child(2n) {
+    background-color: lightgray;
+}
+
+.starttime {
+    font-size: small;
+}
