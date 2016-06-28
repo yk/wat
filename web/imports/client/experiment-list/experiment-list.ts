@@ -1,17 +1,17 @@
 import 'reflect-metadata';
 import './experiment-list.css';
-import {Component} from 'angular2/core';
+import {Component} from '@angular/core';
 import {Constants} from '../../constants';
 
 import {Experiments} from '../../collections/experiments';
 
-import {RouterLink} from 'angular2/router';
+import {ROUTER_DIRECTIVES} from '@angular/router';
 
 @Component({
     selector: 'experiment-list',
     templateUrl: Constants.BASE + 'imports/client/experiment-list/experiment-list.html',
     styleUrls: [Constants.BASE + 'imports/client/experiment-list/experiment-list.css'],
-    directives: [RouterLink]
+    directives: [ROUTER_DIRECTIVES]
 })
 export class ExperimentList {
     experiments: Mongo.Cursor<Experiment>;

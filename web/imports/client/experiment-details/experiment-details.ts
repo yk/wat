@@ -1,15 +1,13 @@
 import 'reflect-metadata';
 import './experiment-details.css';
-import {Component} from 'angular2/core';
-import {MeteorComponent} from 'angular2-meteor/meteor_component';
+import {Component} from '@angular/core';
+import {MeteorComponent} from 'angular2-meteor';
 import {Constants} from '../../constants';
-
-import {RouteParams} from 'angular2/router';
 
 import {Experiments} from '../../collections/experiments';
 import {Analyses} from '../../collections/analyses';
 
-import {RouterLink, Router} from 'angular2/router';
+import {ROUTER_DIRECTIVES, Router, ActivatedRoute} from '@angular/router';
 
 import {AnalysisPlot} from '../analysis-plot/analysis-plot';
 import {AnalysisScatter} from '../analysis-scatter/analysis-scatter';
@@ -18,16 +16,16 @@ import {AnalysisScatter} from '../analysis-scatter/analysis-scatter';
     selector: 'experiment-details',
     templateUrl: Constants.BASE + '/imports/client/experiment-details/experiment-details.html',
     styleUrls: [Constants.BASE + '/imports/client/experiment-details/experiment-details.css'],
-    directives: [RouterLink, AnalysisPlot, AnalysisScatter]
+    directives: [ROUTER_DIRECTIVES, AnalysisPlot, AnalysisScatter]
 })
 export class ExperimentDetails extends MeteorComponent{
     experiment: Experiment;
     analyses: Mongo.Cursor<Analysis>;
     _router: Router;
 
-    constructor(params: RouteParams, router: Router) {
+    constructor(route: ActivatedRoute, router: Router) {
         super();
-        let experimentId = params.get('experimentId');
+        let experimentId = route.snapshot.params.experimentId;
         this.analyses = Analyses.find({experiment: experimentId}, {sort:{date: -1}});
         this.autorun(() => {
             this.experiment = Experiments.findOne(experimentId);

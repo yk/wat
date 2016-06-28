@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import './analysis-plot.css';
-import {Component, OnChanges, Input, ElementRef} from 'angular2/core';
+import {Component, OnChanges, Input, ElementRef} from '@angular/core';
 import {Constants} from '../../constants';
 
 declare var Plotly: any;

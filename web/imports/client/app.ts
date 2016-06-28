@@ -1,10 +1,11 @@
 import 'reflect-metadata';
 import 'zone.js/dist/zone';
-import {Component, NgZone, provide} from 'angular2/core';
+import { Component, NgZone, provide, PlatformRef } from '@angular/core';
 
-import {bootstrap} from 'angular2-meteor-auto-bootstrap';
+import { bootstrap } from '@angular/platform-browser-dynamic';
 
-import {ROUTER_PROVIDERS, ROUTER_DIRECTIVES, RouteConfig, APP_BASE_HREF} from 'angular2/router';
+import { APP_BASE_HREF } from '@angular/common';
+import { ROUTER_DIRECTIVES, provideRouter, Router } from '@angular/router';
 
 import {ExperimentList} from './experiment-list/experiment-list';
 
@@ -16,10 +17,11 @@ import {Constants} from '../constants';
     template: '<router-outlet></router-outlet>',
     directives: [ROUTER_DIRECTIVES]
 })
-@RouteConfig([
-    { path: '/', as: 'ExperimentList', component: ExperimentList },
-    { path: '/experiment/:experimentId', as: 'ExperimentDetails', component: ExperimentDetails },
-])
-class Socially {}
+class WatApp {}
 
-bootstrap(Socially, [ROUTER_PROVIDERS, provide(APP_BASE_HREF, { useValue: Constants.BASE })]);
+bootstrap(WatApp, [provide(APP_BASE_HREF, { useValue: Constants.BASE }),
+    provideRouter([
+        { path: '', component: ExperimentList },
+        { path: 'experiment/:experimentId', component: ExperimentDetails },
+    ]),
+]);
