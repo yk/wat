@@ -36,7 +36,7 @@ export class ExperimentDetails extends MeteorComponent{
     deleteExperiment(){
         if(confirm("Really delete")){
             Experiments.remove(this.experiment._id);
-            this._router.navigate(['ExperimentList']);
+            this._router.navigate('/');
         }
     }
 

@@ -11,16 +11,16 @@
       </tr>
     <tr *ngFor="let exp of experiments">
         <td>
-            <a [routerLink]="['/experiment-details', exp._id]">View</a>
+            <a md-button [routerLink]="['/experiment-details', exp._id]">View</a>
         </td>
         <td>{{exp._id.substring(0, 6)}}</td>
         <td>
             <input class="description" [(ngModel)]="exp.description" placeholder="description">
-            <button (click)="setDescription(exp, exp.description)">Save</button>
+            <button md-button (click)="setDescription(exp, exp.description)">Save</button>
         </td>
         <td class="starttime">{{exp.start_time}}</td>
         <td>
-        <button (click)="deleteExperiment(exp)">Delete</button>
+        <button md-button (click)="deleteExperiment(exp)">Delete</button>
         </td>
     </tr>
   </table>

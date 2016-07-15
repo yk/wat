@@ -1,0 +1,16 @@
+<md-sidenav-layout fullscreen>
+    <md-sidenav #sidenav>
+        <md-nav-list>
+            <a md-list-item *ngFor="let view of views" [routerLink]="view.path" (click)="sidenav.close()">
+                <span md-line>{{view.name}}</span>
+            </a>
+        </md-nav-list>
+    </md-sidenav>
+    <md-toolbar color="primary">
+        <button md-icon-button (click)="sidenav.open()">
+            <md-icon>menu</md-icon>
+        </button>
+        Wat
+    </md-toolbar>
+    <router-outlet></router-outlet>
+</md-sidenav-layout>

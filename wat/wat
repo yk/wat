@@ -862,6 +862,8 @@ def _main():
         args.func(args)
     elif command == 'cat':
         args.func(args)
+    elif command == 'abortconfig':
+        args.func(args)
     elif command == 'deleteconfig':
         args.func(args)
     elif command == 'push':
