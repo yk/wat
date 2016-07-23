@@ -92,6 +92,14 @@ def config_path_file(experiment, config):
     return os.path.join(config_dir(experiment, config), "path")
 
 
+def git_commit_file(experiment):
+    return os.path.join(experiment_dir(experiment), 'git_commit')
+
+
+def git_diff_file(experiment):
+    return os.path.join(experiment_dir(experiment), 'git_diff')
+
+
 def base_hosts_file():
     return os.path.join(base_dir(), "hosts.yml")
 
@@ -219,6 +227,8 @@ def run(args):
     confs_path = configs_dir(uid)
     os.makedirs(confs_path)
     shutil.copy(args.experiment_file, conf_spec_path(uid))
+    write_git_cmd = "git rev-parse HEAD > {} && git diff > {}".format(git_commit_file(uid), git_diff_file(uid))
+    _system(write_git_cmd)
     tmp_entries = []
     for idx, conf in enumerate(confs):
         config = str(idx)
@@ -483,7 +493,11 @@ def save(args):
             if stats['status'] == Status.collected:
                 with open(conf_spec_path(e)) as f:
                     conf_spec = yaml.load(f)
-                exp_dict = dict(_id=e, configurations=[], conf_spec=conf_spec, start_time=stats['start_time'])
+                with open(git_commit_file(e)) as f:
+                    git_commit = f.read().strip()
+                with open(git_diff_file(e)) as f:
+                    git_diff = f.read().strip()
+                exp_dict = dict(_id=e, configurations=[], conf_spec=conf_spec, start_time=stats['start_time'], git_commit=git_commit, git_diff=git_diff)
                 for cs in stats['configurations']:
                     cd = config_dir(e, cs['config'])
                     end_time, exit_status, stdout, stderr = map(lambda fn: _read_file("{}/{}".format(cd, fn).strip()), ['endtime', 'exit_status', 'stdout.txt', 'stderr.txt'])
