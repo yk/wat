@@ -2,10 +2,10 @@
 <a routerLink="/">Back</a>
 <button (click)="deleteExperiment()">Delete</button>
 <h4>{{experiment?.description}}</h4>
-<div>
-    <div *ngIf="!experiment">
-        <p>loading experiment...</p>
-    </div>
+<div *ngIf="!experiment">
+    <p>loading experiment...</p>
+</div>
+<div *ngIf="experiment?.analysis">
     <div *ngFor="#ana of experiment.analysis">
         <div *ngIf="ana?.spec?.atype === 'plot' && !!experiment">
             <analysis-plot [experiment]="experiment" [analysis]="ana"></analysis-plot>
