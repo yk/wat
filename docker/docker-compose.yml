@@ -1,0 +1,22 @@
+networks:
+    nginx:
+        driver: bridge
+
+version: '2'
+services:
+    mongo:
+        image: mongo
+        ports:
+            - "27017:27017"
+        networks:
+            - nginx
+        volumes:
+            - "~/.mongodata:/data/db:rw"
+    wat:
+        build: .
+        ports: 
+            - "3333:80"
+        networks:
+            - nginx
+        depends_on:
+            - mongo
