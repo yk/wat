@@ -5,7 +5,6 @@ import {MeteorComponent} from 'angular2-meteor';
 import {Constants} from '../../constants';
 
 import {Experiments} from '../../collections/experiments';
-import {Analyses} from '../../collections/analyses';
 
 import {ROUTER_DIRECTIVES, Router, ActivatedRoute} from '@angular/router';
 
@@ -20,13 +19,11 @@ import {AnalysisScatter} from '../analysis-scatter/analysis-scatter';
 })
 export class ExperimentDetails extends MeteorComponent{
     experiment: Experiment;
-    analyses: Mongo.Cursor<Analysis>;
     _router: Router;
 
     constructor(route: ActivatedRoute, router: Router) {
         super();
         let experimentId = route.snapshot.params.experimentId;
-        this.analyses = Analyses.find({experiment: experimentId}, {sort:{date: -1}});
         this.autorun(() => {
             this.experiment = Experiments.findOne(experimentId);
         }, true);

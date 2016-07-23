@@ -682,15 +682,14 @@ def _analyze_experiment(exp_dict, analysis_specs, replace=False):
     with MongoClient() as client:
         db = client['wat']
         if replace:
-            db.analysis.remove({'experiment': exp_dict['_id']})
+            db.experiments.update({'_id': exp_dict['_id']}, {'$set': {'analysis': []}}, upsert=True)
         for spec in analysis_specs:
             name = spec['name']
             a = dict(spec=spec)
             a['date'] = datetime.datetime.now()
-            a['experiment'] = exp_dict['_id']
             a['_id'] = _uuid()
             print("Saving analysis {}: {}".format(exp_dict['_id'], name))
-            db.analysis.insert_one(a)
+            db.experiments.update({'_id': exp_dict['_id']}, {'$push': {'analysis': a}}, upsert=True)
 
 
 def _analyze(experiment, analysis_spec, replace=False):
@@ -745,7 +744,7 @@ def push(args):
     rname = args.remote_name
     remote = _get_remote_for_name(rname)
 
-    for col in ['experiments', 'analysis']:
+    for col in ['experiments']:
         fn = os.path.join(data_dir(), '{}.json'.format(col))
         e_cmd = "mongoexport --db wat --collection {} --out {}".format(col, fn)
         i_cmd = "mongoimport --host {}:{} --db wat --collection {} --upsert -j 4 --file {}".format(remote['hostname'], remote['port'], col, fn)
