@@ -569,6 +569,8 @@ def abort_experiment(args):
     for sstr in args.search_string:
         exp = _find_single_experiment(sstr)
         _abort(exp)
+        if args.purge:
+            _purge(exp)
 
 
 def abort_config(args):
@@ -798,6 +800,7 @@ def _main():
 
     parser_abort = subparsers.add_parser("abort", help="abort an experiment")
     parser_abort.add_argument('search_string', nargs='+')
+    parser_abort.add_argument('-p', '--purge', action='store_true', help="purge experiment after aborting")
     parser_abort.set_defaults(func=abort_experiment)
 
     parser_abort_config = subparsers.add_parser("abortconfig", help="abort a config")
